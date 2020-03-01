@@ -1,21 +1,78 @@
 from . import engine as css_engine
+from . import parser
 from .constants import (  # noqa
     ALIGN_CONTENT_CHOICES, ALIGN_ITEMS_CHOICES, ALIGN_SELF_CHOICES, AUTO,
-    BACKGROUND_COLOR_CHOICES, BORDER_COLOR_CHOICES, BORDER_STYLE_CHOICES,
-    BORDER_WIDTH_CHOICES, BOX_OFFSET_CHOICES, CLEAR_CHOICES, COLOR_CHOICES,
-    DIRECTION_CHOICES, DISPLAY_CHOICES, FLEX_BASIS_CHOICES,
-    FLEX_DIRECTION_CHOICES, FLEX_GROW_CHOICES, FLEX_SHRINK_CHOICES, FLEX_START,
-    FLEX_WRAP_CHOICES, FLOAT_CHOICES, GRID_AUTO_CHOICES,
-    GRID_AUTO_FLOW_CHOICES, GRID_GAP_CHOICES, GRID_PLACEMENT_CHOICES,
-    GRID_TEMPLATE_AREA_CHOICES, GRID_TEMPLATE_CHOICES, INLINE,
-    JUSTIFY_CONTENT_CHOICES, LTR, MARGIN_CHOICES, MAX_SIZE_CHOICES,
-    MIN_SIZE_CHOICES, NORMAL, NOWRAP, ORDER_CHOICES, PADDING_CHOICES,
-    POSITION_CHOICES, ROW, SIZE_CHOICES, STATIC, STRETCH,
-    TRANSPARENT, UNICODE_BIDI_CHOICES, VISIBILITY_CHOICES, VISIBLE,
-    Z_INDEX_CHOICES, default,
+    BACKGROUND_COLOR_CHOICES, BORDER_COLLAPSE_CHOICES, BORDER_COLOR_CHOICES,
+    BORDER_SPACING_CHOICES, BORDER_STYLE_CHOICES, BORDER_WIDTH_CHOICES,
+    BOX_OFFSET_CHOICES, CAPTION_SIDE_CHOICES, CLEAR_CHOICES, CLIP_CHOICES,
+    COLOR_CHOICES, DIRECTION_CHOICES, DISPLAY_CHOICES, EMPTY_CELLS_CHOICES,
+    FLEX_BASIS_CHOICES, FLEX_DIRECTION_CHOICES, FLEX_GROW_CHOICES,
+    FLEX_SHRINK_CHOICES, FLEX_START, FLEX_WRAP_CHOICES, FLOAT_CHOICES,
+    GRID_AUTO_CHOICES, GRID_AUTO_FLOW_CHOICES, GRID_GAP_CHOICES,
+    GRID_PLACEMENT_CHOICES, GRID_TEMPLATE_AREA_CHOICES, GRID_TEMPLATE_CHOICES,
+    INITIAL, INLINE, INVERT, JUSTIFY_CONTENT_CHOICES, LETTER_SPACING_CHOICES,
+    LTR, MARGIN_CHOICES, MAX_SIZE_CHOICES, MEDIUM, MIN_SIZE_CHOICES, NORMAL,
+    NOWRAP, ORDER_CHOICES, ORPHANS_CHOICES, OUTLINE_COLOR_CHOICES,
+    OUTLINE_STYLE_CHOICES, OUTLINE_WIDTH_CHOICES, OVERFLOW_CHOICES,
+    PADDING_CHOICES, PAGE_BREAK_AFTER_CHOICES, PAGE_BREAK_BEFORE_CHOICES,
+    PAGE_BREAK_INSIDE_CHOICES, POSITION_CHOICES, QUOTES_CHOICES, ROW,
+    SEPARATE, SHOW, SIZE_CHOICES, STATIC, STRETCH, TABLE_LAYOUT_CHOICES,
+    TEXT_ALIGN_CHOICES, TEXT_DECORATION_CHOICES, TEXT_INDENT_CHOICES,
+    TEXT_TRANSFORM_CHOICES, TOP, TRANSPARENT, UNICODE_BIDI_CHOICES,
+    VISIBILITY_CHOICES, VISIBLE, WHITE_SPACE_CHOICES, WIDOWS_CHOICES,
+    WORD_SPACING_CHOICES, Z_INDEX_CHOICES, OtherProperty,
+    TextAlignInitialValue, default,
 )
+from .exceptions import ValidationError
+from .wrappers import Border, BorderBottom, BorderLeft, BorderRight, BorderTop, Outline
 
 _CSS_PROPERTIES = set()
+
+
+def validated_shorthand_property(name, parser, wrapper):
+    """Define the shorthand CSS font property."""
+
+    def getter(self):
+        properties = {}
+        for property_name in wrapper.VALID_KEYS:
+            try:
+                properties[property_name] = getattr(self, '_%s' % property_name)
+            except AttributeError:
+                pass
+
+        # This is the only place we use the wrapper as a convenience for the user
+        return wrapper(**properties) if properties else ''
+
+    def setter(self, value):
+        try:
+            # A shorthand parser must return a dictionary
+            shorthand_dict = parser(value)
+        except ValidationError:
+            raise ValueError("Invalid value '%s' for CSS property '%s'!" % (value, name))
+
+        # Reset non declared properties to initial values
+        used_properties = shorthand_dict.keys()
+        for property_name in wrapper.VALID_KEYS:
+            if property_name in used_properties:
+                setattr(self, property_name, shorthand_dict[property_name])
+            else:
+                delattr(self, property_name)
+
+        # We do not explicitely set the shorthand property as it is stored in the
+        # individual properties it represents
+        self.dirty = True
+
+    def deleter(self):
+        for property_name in wrapper.VALID_KEYS:
+            try:
+                delattr(self, property_name)
+                self.dirty = True
+            except AttributeError:
+                # Attribute doesn't exist
+                pass
+
+    _CSS_PROPERTIES.add(name)
+    return property(getter, setter, deleter)
 
 
 def unvalidated_property(name, choices, initial):
@@ -44,10 +101,29 @@ def unvalidated_property(name, choices, initial):
 
 def validated_property(name, choices, initial):
     "Define a simple CSS property attribute."
-    initial = choices.validate(initial)
+    try:
+        initial = choices.validate(initial)
+    except ValueError:
+        # The initial value might be a OtherProperty or Custom class with a value method
+        try:
+            # Check it has a value attribute
+            value_attr = getattr(initial, 'value')
+
+            # Check the value attribute is a callable
+            if not callable(value_attr):
+                raise ValueError('Initial value "%s" `value` attribute is not callable!' % initial)
+
+        except AttributeError:
+            raise ValueError('Initial value "%s" does not have a value attribute!' % initial)
 
     def getter(self):
-        return getattr(self, '_%s' % name, initial)
+        try:
+            # Get initial value from other property value. See OtherProperty.
+            initial_value = initial.value(self)
+        except AttributeError:
+            initial_value = initial
+
+        return getattr(self, '_%s' % name, initial_value)
 
     def setter(self, value):
         try:
@@ -160,10 +236,14 @@ class CSS:
     border_width = directional_property('border%s_width', initial=0)
 
     # 8.5.2 Border color
-    border_top_color = validated_property('border_top_color', choices=BORDER_COLOR_CHOICES, initial=TRANSPARENT)
-    border_right_color = validated_property('border_right_color', choices=BORDER_COLOR_CHOICES, initial=TRANSPARENT)
-    border_bottom_color = validated_property('border_bottom_color', choices=BORDER_COLOR_CHOICES, initial=TRANSPARENT)
-    border_left_color = validated_property('border_left_color', choices=BORDER_COLOR_CHOICES, initial=TRANSPARENT)
+    border_top_color = validated_property('border_top_color', choices=BORDER_COLOR_CHOICES,
+                                          initial=OtherProperty('color'))
+    border_right_color = validated_property('border_right_color', choices=BORDER_COLOR_CHOICES,
+                                            initial=OtherProperty('color'))
+    border_bottom_color = validated_property('border_bottom_color', choices=BORDER_COLOR_CHOICES,
+                                             initial=OtherProperty('color'))
+    border_left_color = validated_property('border_left_color', choices=BORDER_COLOR_CHOICES,
+                                           initial=OtherProperty('color'))
     border_color = directional_property('border%s_color', initial=0)
 
     # 8.5.3 Border style
@@ -174,15 +254,16 @@ class CSS:
     border_style = directional_property('border%s_style', initial=None)
 
     # 8.5.4 Border shorthand properties
-    # border_top
-    # border_right
-    # border_bottom
-    # border_left
-    # border
+    border_top = validated_shorthand_property('border_top', parser=parser.border_top, wrapper=BorderTop)
+    border_right = validated_shorthand_property('border_right', parser=parser.border_right, wrapper=BorderRight)
+    border_bottom = validated_shorthand_property('border_bottom', parser=parser.border_bottom, wrapper=BorderBottom)
+    border_left = validated_shorthand_property('border_left', parser=parser.border_left, wrapper=BorderLeft)
+    border = validated_shorthand_property('border', parser=parser.border, wrapper=Border)
 
     # 9. Visual formatting model #########################################
     # 9.2.4 The display property
     display = validated_property('display', choices=DISPLAY_CHOICES, initial=INLINE)
+
     # 9.3 Positioning schemes
     position = validated_property('position', choices=POSITION_CHOICES, initial=STATIC)
 
@@ -194,6 +275,7 @@ class CSS:
 
     # 9.5.1 Positioning the float
     float = validated_property('float', choices=FLOAT_CHOICES, initial=None)
+
     # 9.5.2 Controlling flow next to floats
     clear = validated_property('clear', choices=CLEAR_CHOICES, initial=None)
 
@@ -227,10 +309,10 @@ class CSS:
 
     # 11. Visual effects #################################################
     # 11.1.1 Overflow
-    # overflow
+    overflow = validated_property('overflow', choices=OVERFLOW_CHOICES, initial=VISIBLE)
 
     # 11.1.2 Clip
-    # clip
+    clip = validated_property('clip', choices=CLIP_CHOICES, initial=AUTO)
 
     # 11.2 Visibility
     visibility = validated_property('visibility', choices=VISIBILITY_CHOICES, initial=VISIBLE)
@@ -240,7 +322,7 @@ class CSS:
     # content
 
     # 12.3 Quotation marks
-    # quotes
+    quotes = validated_property('quotes', choices=QUOTES_CHOICES, initial=INITIAL)  # TODO: Depends on user agent
 
     # 12.4 Automatic counters and numbering
     # counter-reset
@@ -254,13 +336,13 @@ class CSS:
 
     # 13. Paged media ####################################################
     # 13.3.1 Page break properties
-    # page_break_before
-    # page_break_after
-    # page_break_inside
+    page_break_before = validated_property('page_break_before', choices=PAGE_BREAK_BEFORE_CHOICES, initial=AUTO)
+    page_break_after = validated_property('page_break_after', choices=PAGE_BREAK_AFTER_CHOICES, initial=AUTO)
+    page_break_inside = validated_property('page_break_inside', choices=PAGE_BREAK_INSIDE_CHOICES, initial=AUTO)
 
     # 13.3.2 Breaks inside elements
-    # orphans
-    # widows
+    orphans = validated_property('orphans', choices=ORPHANS_CHOICES, initial=2)
+    widows = validated_property('widows', choices=WIDOWS_CHOICES, initial=2)
 
     # 14. Colors and backgrounds #########################################
     # 14.1 Foreground color
@@ -295,45 +377,46 @@ class CSS:
 
     # 16. Text ###########################################################
     # 16.1 Indentation
-    # text_indent
+    text_indent = validated_property('text_indent', choices=TEXT_INDENT_CHOICES, initial=0)
 
     # 16.2 Alignment
-    # text_align
+    text_align = validated_property('text_align', choices=TEXT_ALIGN_CHOICES,
+                                    initial=TextAlignInitialValue())
 
     # 16.3 Decoration
-    # text_decoration
+    text_decoration = validated_property('text_decoration', choices=TEXT_DECORATION_CHOICES, initial=None)
 
     # 16.4 Letter and word spacing
-    # letter_spacing
-    # word_spacing
+    letter_spacing = validated_property('letter_spacing', choices=LETTER_SPACING_CHOICES, initial=NORMAL)
+    word_spacing = validated_property('word_spacing', choices=WORD_SPACING_CHOICES, initial=NORMAL)
 
     # 16.5 Capitalization
-    # text_transform
+    text_transform = validated_property('text_transform', choices=TEXT_TRANSFORM_CHOICES, initial=None)
 
     # 16.6 White space
-    # white_space
+    white_space = validated_property('white_space', choices=WHITE_SPACE_CHOICES, initial=NORMAL)
 
     # 17. Tables #########################################################
     # 17.4.1 Caption position and alignment
-    # caption_side
+    caption_side = validated_property('caption_side', choices=CAPTION_SIDE_CHOICES, initial=TOP)
 
     # 17.5.2 Table width algorithms
-    # table_layout
+    table_layout = validated_property('table_layout', choices=TABLE_LAYOUT_CHOICES, initial=AUTO)
 
     # 17.6 Borders
-    # border_collapse
-    # border_spacing
-    # empty_cells
+    border_collapse = validated_property('border_collapse', choices=BORDER_COLLAPSE_CHOICES, initial=SEPARATE)
+    border_spacing = validated_property('border_spacing', choices=BORDER_SPACING_CHOICES, initial=0)
+    empty_cells = validated_property('empty_cells', choices=EMPTY_CELLS_CHOICES, initial=SHOW)
 
     # 18. User interface #################################################
     # 18.1 Cursors
     # cursor
 
     # 18.4 Dynamic outlines
-    # outline_width
-    # outline_style
-    # outline_color
-    # outline
+    outline_width = validated_property('outline_width', choices=OUTLINE_WIDTH_CHOICES, initial=MEDIUM)
+    outline_style = validated_property('outline_style', choices=OUTLINE_STYLE_CHOICES, initial=None)
+    outline_color = validated_property('outline_color', choices=OUTLINE_COLOR_CHOICES, initial=INVERT)
+    outline = validated_shorthand_property('outline', parser=parser.outline, wrapper=Outline)
 
     ######################################################################
     # Flexbox properties
